@@ -5,12 +5,14 @@ import sys
 import zipfile
 import requests
 import io
+import os
 import openrouteservice
 import geopandas as gpd
 import matplotlib.pyplot as plt
 from shapely.geometry import Point, Polygon, MultiPolygon, shape
 from thefuzz import process  
 import folium
+import numpy as np
 import time
 from datetime import datetime
 
@@ -72,7 +74,6 @@ def download_bpe():
         file_name = z.namelist()[0]
         with z.open(file_name) as csv_file:
             df_bpe = pd.read_csv(csv_file, delimiter = ';')
-    df_bpe.head()
     df_bpe.rename(columns={'LATITUDE': "latitude", 'LONGITUDE': "longitude", "NOMRS": "location", "DOM": "category"}, inplace=True)
     df_bpe = df_bpe.filter(items=["latitude","longitude","location","category","geometry"])
     df_bpe = df_to_geo(df_bpe)
@@ -85,24 +86,30 @@ def df_to_geo(df):
 
 def download_carreaus():
     #CARREAU_url = "https://www.insee.fr/fr/statistiques/fichier/6215138/Filosofi2017_carreaux_200m_shp.zip"
-
-    carreaus_geo = gpd.read_file("/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus.geojson")
-
-    if carreaus_geo["updated_at"].isna().all():
-        shapefile_path_mart = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/Filosofi2017_carreaux_200m_shp/Filosofi2017_carreaux_200m_mart.shp"
+    REUN_file_path = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus_reun.geojson"
+    MART_file_path = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus_mart.geojson"
+    MET_file_path = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus_met.geojson"
+    
+    if os.path.exists(MET_file_path):
+        carreaus_geo = gpd.read_file(REUN_file_path)
+    else:
+        #shapefile_path_mart = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/Filosofi2017_carreaux_200m_shp/Filosofi2017_carreaux_200m_mart.shp"
         #shapefile_path_reun = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/Filosofi2017_carreaux_200m_shp/Filosofi2017_carreaux_200m_reun.shp"
-        #shapefile_path_met = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/Filosofi2017_carreaux_200m_shp/Filosofi2017_carreaux_200m_met.shp"
+        shapefile_path_met = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/Filosofi2017_carreaux_200m_shp/Filosofi2017_carreaux_200m_met.shp"
         
-        carreaus_geo_mart = gpd.read_file(shapefile_path_mart)
-        carreaus_geo_mart = carreaus_geo_mart.to_crs(epsg=4326)
+        #carreaus_geo_mart = gpd.read_file(shapefile_path_mart)
+        #carreaus_geo_mart = carreaus_geo_mart.to_crs(epsg=4326)
         
         #carreaus_geo_reun = gpd.read_file(shapefile_path_reun)
         #carreaus_geo_reun = carreaus_geo_reun.to_crs(epsg=4326)
         
-        #carreaus_geo_met = gpd.read_file(shapefile_path_met)
-        #carreaus_geo_met = carreaus_geo_met.to_crs(epsg=4326)
+        carreaus_geo_met = gpd.read_file(shapefile_path_met)
+        carreaus_geo_met = carreaus_geo_met.to_crs(epsg=4326)
         
-        carreaus_geo = gpd.GeoDataFrame(pd.concat([carreaus_geo_mart], ignore_index=True))
+        carreaus_geo = gpd.GeoDataFrame(pd.concat([carreaus_geo_met], ignore_index=True))
+        
+        if "updated_at" not in carreaus_geo.columns:
+            carreaus_geo["updated_at"] = np.nan
         
         carreaus_geo["longitude"] = carreaus_geo.geometry.centroid.x
         carreaus_geo["latitude"] = carreaus_geo.geometry.centroid.y
@@ -124,7 +131,7 @@ def map_carreaus_osrm(carr_geo, df):
     query_count = 0
     for idx, row in carr_geo.iterrows(): #vectorize to run over columns
     
-        if query_count <= 0 and pd.isna(row["updated_at"]):
+        if query_count <= 300 and pd.isna(row["updated_at"]):
             lat = row['latitude']
             lon = row['longitude']
         
@@ -189,22 +196,22 @@ def map_carreaus_osrm(carr_geo, df):
         plt.show()
     return carr_geo
 
-m = folium.Map(location=[2.3522, 48.8566], zoom_start=12)
+#m = folium.Map(location=[2.3522, 48.8566], zoom_start=12)
 
 #folium.GeoJson(isochrone_gdf, style_function=lambda x: {"color": "blue"}).add_to(m)
 
-df_user_add = accept_user_file()
-identify_lat_long(df_user_add)
-df_user_geo = df_to_geo(df_user_add)
+df_user = accept_user_file()
+#def calculate_carreaus(df_user, weight_1, weight_2):
+identify_lat_long(df_user)
+df_user_geo = df_to_geo(df_user)
 df_bpe = download_bpe()
-print(df_bpe)
 carreaus = download_carreaus()
 carreaus_copy = carreaus.copy()
 carreaus = map_carreaus_osrm(carreaus_copy, df_bpe)
-carreaus.to_file("/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus.geojson", driver="GeoJSON")
+carreaus.to_file("/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus_met.geojson", driver="GeoJSON")
 gdf = gpd.GeoDataFrame(df_bpe, geometry="geometry", crs="EPSG:5794") #4326 - Europe
 pd.set_option("display.max_columns", None)
-m.save("isochrone_map.html")
+#m.save("isochrone_map.html")
         
-m
+#m
         
