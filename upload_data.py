@@ -5,6 +5,7 @@ import sys
 import zipfile
 import requests
 import io
+import json
 import os
 import openrouteservice
 import geopandas as gpd
@@ -18,6 +19,15 @@ from datetime import datetime
 
 API_KEY_ORS = "5b3ce3597851110001cf6248e1c21942e51e45a9ba5e6081a595bc3d"  # Replace with your actual key
 client = openrouteservice.Client(key=API_KEY_ORS)
+REUN_file_path = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus_reun.geojson"
+MART_file_path = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus_mart.geojson"
+MET_file_path = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus_met.geojson"
+
+REUN_isochrones = ""
+
+reun_min_lat, reun_max_lat, reun_min_lon, reun_max_lon = -21.038, -21.182, 55.497, 55.608
+mart_min_lat, mart_max_lat, mart_min_lon, mart_max_lon = 14.817, 14.478, -60.866, -61.148
+
 
 def accept_user_file():
     root = tk.Tk()
@@ -86,27 +96,24 @@ def df_to_geo(df):
 
 def download_carreaus():
     #CARREAU_url = "https://www.insee.fr/fr/statistiques/fichier/6215138/Filosofi2017_carreaux_200m_shp.zip"
-    REUN_file_path = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus_reun.geojson"
-    MART_file_path = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus_mart.geojson"
-    MET_file_path = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus_met.geojson"
     
-    if os.path.exists(MET_file_path):
-        carreaus_geo = gpd.read_file(REUN_file_path)
+    if os.path.exists(MART_file_path):
+        carreaus_geo = gpd.read_file(MART_file_path)
     else:
-        #shapefile_path_mart = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/Filosofi2017_carreaux_200m_shp/Filosofi2017_carreaux_200m_mart.shp"
-        #shapefile_path_reun = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/Filosofi2017_carreaux_200m_shp/Filosofi2017_carreaux_200m_reun.shp"
-        shapefile_path_met = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/Filosofi2017_carreaux_200m_shp/Filosofi2017_carreaux_200m_met.shp"
+        shapefile_path_mart = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/Filosofi2017_carreaux_200m_shp/Filosofi2017_carreaux_200m_mart.shp"
+        shapefile_path_reun = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/Filosofi2017_carreaux_200m_shp/Filosofi2017_carreaux_200m_reun.shp"
+        #shapefile_path_met = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/Filosofi2017_carreaux_200m_shp/Filosofi2017_carreaux_200m_met.shp"
         
-        #carreaus_geo_mart = gpd.read_file(shapefile_path_mart)
-        #carreaus_geo_mart = carreaus_geo_mart.to_crs(epsg=4326)
+        carreaus_geo_mart = gpd.read_file(shapefile_path_mart)
+        carreaus_geo_mart = carreaus_geo_mart.to_crs(epsg=4326)
         
         #carreaus_geo_reun = gpd.read_file(shapefile_path_reun)
         #carreaus_geo_reun = carreaus_geo_reun.to_crs(epsg=4326)
         
-        carreaus_geo_met = gpd.read_file(shapefile_path_met)
-        carreaus_geo_met = carreaus_geo_met.to_crs(epsg=4326)
+        #carreaus_geo_met = gpd.read_file(shapefile_path_met)
+        #carreaus_geo_met = carreaus_geo_met.to_crs(epsg=4326)
         
-        carreaus_geo = gpd.GeoDataFrame(pd.concat([carreaus_geo_met], ignore_index=True))
+        carreaus_geo = gpd.GeoDataFrame(pd.concat([carreaus_geo_mart], ignore_index=True))
         
         if "updated_at" not in carreaus_geo.columns:
             carreaus_geo["updated_at"] = np.nan
@@ -116,6 +123,39 @@ def download_carreaus():
 
     return carreaus_geo
 
+def map_carreaus_osrm_local(carr_geo, gdf):
+        
+    gdf_iso = gpd.read_file("/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/isochrones/results_foot-walking_laReunion_900_300.geojson")
+    #print(gdf_iso.head())
+    
+    if "metadata" in  gdf_iso.columns:
+        metadata_df =  gdf_iso["metadata"].apply(pd.Series)
+        gdf_iso = gdf_iso.drop(columns=["metadata"]).join(metadata_df)
+    if "query" in  gdf_iso.columns:
+        query_df =  gdf_iso["query"].apply(pd.Series)
+        gdf_iso = gdf_iso.drop(columns=["query"]).join(query_df)
+        
+    gdf_iso["carreaux"] = gdf_iso["carreaux"].apply(lambda x: eval(x) if isinstance(x, str) else x)
+    
+    #joined = gpd.sjoin(gdf, gdf_iso, predicate="intersects", how="left")
+    #print(joined.head())
+    
+    #score_counts = joined.groupby("index_right").size()
+    #gdf_iso["score"] = gdf_iso.index.map(score_counts).fillna(0).astype(int)
+    #gdf_iso = gdf_iso[gdf_iso["score"] > 0]
+    #gdf_iso = gdf_iso[~gdf_iso.geometry.is_empty & gdf_iso.geometry.notnull()]
+    
+    print(gdf_iso.head())
+
+    gdf_filtered = gdf[gdf.geometry.x.between(mart_min_lat,mart_max_lat) & gdf.geometry.y.between(mart_min_lon, mart_max_lon)]
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    gdf_iso.plot(ax=ax, color="lightblue", alpha=0.5, edgecolor="black")  # Polygons
+    gdf_filtered.plot(ax=ax, color="red", markersize=10, alpha=0.7)  # Points
+    
+    plt.title("Check Overlap Between Points and Polygons")
+    plt.show()
+
 def map_carreaus_osrm(carr_geo, df):
     ORS_URL = "https://api.openrouteservice.org/v2/isochrones/"    
     transport_methods = ["driving-car", "cycling-regular", "foot-walking"]
@@ -124,14 +164,10 @@ def map_carreaus_osrm(carr_geo, df):
     "Content-Type": "application/json"
     }
     
-    #for mode in transport_methods:
-        #carr_geo[f"{mode}_score"] = 0
-    #selected_indices = [1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,1010,1011,1012,1013]
-    
     query_count = 0
     for idx, row in carr_geo.iterrows(): #vectorize to run over columns
     
-        if query_count <= 300 and pd.isna(row["updated_at"]):
+        if query_count <= 900 and pd.isna(row["updated_at"]):
             lat = row['latitude']
             lon = row['longitude']
         
@@ -208,7 +244,8 @@ df_bpe = download_bpe()
 carreaus = download_carreaus()
 carreaus_copy = carreaus.copy()
 carreaus = map_carreaus_osrm(carreaus_copy, df_bpe)
-carreaus.to_file("/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus_met.geojson", driver="GeoJSON")
+#map_carreaus_osrm_local(carreaus_copy, df_bpe)
+carreaus.to_file(MART_file_path, driver="GeoJSON")
 gdf = gpd.GeoDataFrame(df_bpe, geometry="geometry", crs="EPSG:5794") #4326 - Europe
 pd.set_option("display.max_columns", None)
 #m.save("isochrone_map.html")
