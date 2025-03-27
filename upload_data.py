@@ -1,81 +1,82 @@
-import tkinter as tk
-from tkinter import filedialog
+# Command line tool to convert .jsonl files to .geojson files
+#-----------------------------------------------------
+#pv isochrone_file.jsonl | jq -c '
+#    . as $item | $item.features[] | .properties += (
+#        { "metadata": $item.metadata } +
+#        (if $item.bbox then { "carreaux": ($item.bbox | tostring) } else { "carreaux": "null" } end) +
+#        (if $item.Idcar_200m then { "Idcar_200m": $item.Idcar_200m } else {} end)
+#    )' > ischrone_file.geojson
+
+
 import pandas as pd
-import sys
-import zipfile
-import requests
-import io
-import json
-import os
-import openrouteservice
 import geopandas as gpd
-import matplotlib.pyplot as plt
-from shapely.geometry import Point, Polygon, MultiPolygon, shape
-from thefuzz import process  
-import folium
 import numpy as np
-import time
+from shapely.geometry import Point, shape, box
+from joblib import Parallel, delayed
+from tqdm import tqdm
+import fiona
+import matplotlib.pyplot as plt
 from datetime import datetime
+import requests
+import zipfile
+import io
+import os
+from thefuzz import process
+import folium
+import sys
 
-API_KEY_ORS = "5b3ce3597851110001cf6248e1c21942e51e45a9ba5e6081a595bc3d"  # Replace with your actual key
-client = openrouteservice.Client(key=API_KEY_ORS)
-REUN_file_path = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus_reun.geojson"
-MART_file_path = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus_mart.geojson"
-MET_file_path = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/carreaus_met.geojson"
+REUN_file_path = "carreaus_reun.geojson"
+MET_file_path = "/home/onyxia/work/carreaus_met.geojson"
+REUN_isochrones_paths = ["results_driving-car_laReunion_900_300.geojson"]
+CORSE_isochrones_paths = ["/home/onyxia/work/results_driving-car_corse_900_300.geojson"]
+BRETAGNE_isochrones_paths = ["/home/onyxia/work/results_foot-walking_bretagne_900_300.geojson"]
+IDF_isochrones_paths = ["results_driving-car_ile-de-france_900_300.geojson"]
+PACA_isochrones_paths = ["results_driving-car_paca_900_300.geojson"]
+PAYSLOIRE_isochrones_paths = ["results_driving-car_pays-de-la-loire_900_300.geojson"]
+CENTLOIRE_isochrones_paths = ["results_driving-car_centre-val-de-loire_900_300.geojson"]
+ALSACE_isochrones_paths = ["results_driving-car_alsace_900_300.geojson"]
+LORRAINE_isochrones_paths = ["results_driving-car_lorraine_900_300.geojson"]
 
-REUN_isochrones = ""
-
-reun_min_lat, reun_max_lat, reun_min_lon, reun_max_lon = -21.038, -21.182, 55.497, 55.608
-mart_min_lat, mart_max_lat, mart_min_lon, mart_max_lon = 14.817, 14.478, -60.866, -61.148
-
-
-def accept_user_file():
-    root = tk.Tk()
-    root.withdraw()
-    file_path = filedialog.askopenfilename(title="Select a file", filetypes=[("CSV files", "*.csv"), ("Text files", "*.txt")])
-    
-    if not file_path:
-        sys.exit()
-    if file_path.endswith('.csv'):
-        df = pd.read_csv(file_path)
-    elif file_path.endswith('.txt'):
-        df = pd.read_csv(file_path, delimiter="\t")
+def compute_score_columns(gdf_grid, gdf_iso, max_jobs=160, threshold=500):
+    if len(gdf_grid) < threshold:
+        n_jobs = 1
+        print(f"🔍 Using single-threaded scoring (grid size={len(gdf_grid)})")
     else:
-        raise ValueError("Unsupported file format. Please provide a .csv or .txt file.")
-    return df
+        n_jobs = min(max_jobs, max(1, len(gdf_grid) // 50))
+        print(f"⚡ Using parallel scoring with {n_jobs} jobs (grid size={len(gdf_grid)})")
 
-def fuzzy_match_column(df, columns, default_col):
-    best_match = None
-    best_score = 0
-    
-    for col in columns:
-        match, score = process.extractOne(col, df.columns)
-        if score > best_score:
-            best_match = match
-            best_score = score
-            
-    if best_score < 70:
-        match, score = process.extractOne(default_col, df.columns)
-        if score < 70:
-            print(f"No evident columns found. Please identify a {columns[0]} column")
-            sys.exit(1)
-        best_match = match
-    return best_match
+    def process_chunk(grid_chunk):
+        joined = gpd.sjoin(grid_chunk, gdf_iso, predicate="intersects", how="left")
+        if joined.empty:
+            print("⚠️ No intersections in this chunk.")
+        return joined.groupby(["Idcar_200m", "value", "profile"]).size().reset_index(name="score")
 
-def identify_lat_long(df):
-    predefined_lat = ['latitude', 'lat', 'lattitude', 'latitide', 'latitude_fr']
-    predefined_lon = ['longitude', 'long', 'lng', 'longtitude', 'longitude_fr']
-    predefined_loc = ['location', 'nom', 'name', 'landmark', 'title', 'building', 'site']
-    predefined_cat = ['category', 'type', 'label', 'class', 'segment']
+    if n_jobs == 1:
+        score_counts = process_chunk(gdf_grid)
+    else:
+        chunks = np.array_split(gdf_grid, n_jobs)
+        score_counts_chunks = Parallel(n_jobs=n_jobs)(
+            delayed(process_chunk)(chunk) for chunk in chunks
+        )
+        score_counts = pd.concat(score_counts_chunks)
 
-    best_match_lat = fuzzy_match_column(df, predefined_lat, 'x')
-    best_match_long = fuzzy_match_column(df, predefined_lon, 'y')
-    best_match_loc = fuzzy_match_column(df, predefined_loc, 'id')
-    best_match_cat = fuzzy_match_column(df, predefined_cat, 'group')    
-    
-    df.rename(columns={best_match_lat: "latitude", best_match_long: "longitude", best_match_loc: "location", best_match_cat: "category"}, inplace=True)
-    df["geometry"] = df.apply(lambda row: Point(row["longitude"], row["latitude"]), axis=1)
+    score_counts = (
+        score_counts
+        .groupby(["Idcar_200m", "value", "profile"])["score"]
+        .sum()
+        .reset_index()
+    )
+    score_counts["column_name"] = score_counts.apply(
+        lambda row: f"score_{row['profile']}_{int(row['value'])}", axis=1
+    )
 
+    score_pivot = (
+        score_counts.pivot(index="Idcar_200m", columns="column_name", values="score")
+        .fillna(0)
+        .astype(int)
+    )
+    score_pivot.columns.name = None
+    return score_pivot
 
 def download_bpe():
     zip_url = 'https://www.insee.fr/fr/statistiques/fichier/8217525/BPE23.zip'
@@ -83,172 +84,117 @@ def download_bpe():
     with zipfile.ZipFile(io.BytesIO(response.content)) as z:
         file_name = z.namelist()[0]
         with z.open(file_name) as csv_file:
-            df_bpe = pd.read_csv(csv_file, delimiter = ';')
+            df_bpe = pd.read_csv(csv_file, delimiter=';')
     df_bpe.rename(columns={'LATITUDE': "latitude", 'LONGITUDE': "longitude", "NOMRS": "location", "DOM": "category"}, inplace=True)
-    df_bpe = df_bpe.filter(items=["latitude","longitude","location","category","geometry"])
-    df_bpe = df_to_geo(df_bpe)
-    return df_bpe
+    df_bpe = df_bpe.filter(items=["latitude", "longitude", "location", "category"])
+    return df_to_geo(df_bpe)
 
 def df_to_geo(df):
     df["geometry"] = df.apply(lambda row: Point(row["longitude"], row["latitude"]), axis=1)
-    geo_df = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
-    return geo_df
+    return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
 
 def download_carreaus():
-    #CARREAU_url = "https://www.insee.fr/fr/statistiques/fichier/6215138/Filosofi2017_carreaux_200m_shp.zip"
-    
-    if os.path.exists(MART_file_path):
-        carreaus_geo = gpd.read_file(MART_file_path)
+    if os.path.exists(MET_file_path):
+        carreaus_geo = gpd.read_file(MET_file_path)
     else:
-        shapefile_path_mart = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/Filosofi2017_carreaux_200m_shp/Filosofi2017_carreaux_200m_mart.shp"
-        shapefile_path_reun = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/Filosofi2017_carreaux_200m_shp/Filosofi2017_carreaux_200m_reun.shp"
-        #shapefile_path_met = "/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/Filosofi2017_carreaux_200m_shp/Filosofi2017_carreaux_200m_met.shp"
-        
-        carreaus_geo_mart = gpd.read_file(shapefile_path_mart)
-        carreaus_geo_mart = carreaus_geo_mart.to_crs(epsg=4326)
-        
-        #carreaus_geo_reun = gpd.read_file(shapefile_path_reun)
-        #carreaus_geo_reun = carreaus_geo_reun.to_crs(epsg=4326)
-        
-        #carreaus_geo_met = gpd.read_file(shapefile_path_met)
-        #carreaus_geo_met = carreaus_geo_met.to_crs(epsg=4326)
-        
-        carreaus_geo = gpd.GeoDataFrame(pd.concat([carreaus_geo_mart], ignore_index=True))
-        
-        if "updated_at" not in carreaus_geo.columns:
-            carreaus_geo["updated_at"] = np.nan
-        
-        carreaus_geo["longitude"] = carreaus_geo.geometry.centroid.x
-        carreaus_geo["latitude"] = carreaus_geo.geometry.centroid.y
+        raise FileNotFoundError("MET_file_path not found")
 
+    if "updated_at" not in carreaus_geo.columns:
+        carreaus_geo["updated_at"] = np.nan
+
+    carreaus_geo["longitude"] = carreaus_geo.geometry.centroid.x
+    carreaus_geo["latitude"] = carreaus_geo.geometry.centroid.y
     return carreaus_geo
 
-def map_carreaus_osrm_local(carr_geo, gdf):
-        
-    gdf_iso = gpd.read_file("/Users/cpowers/Desktop/DEPP/In_Progress/EcoLab/GD4H/isochrones/results_foot-walking_laReunion_900_300.geojson")
-    #print(gdf_iso.head())
-    
-    if "metadata" in  gdf_iso.columns:
-        metadata_df =  gdf_iso["metadata"].apply(pd.Series)
-        gdf_iso = gdf_iso.drop(columns=["metadata"]).join(metadata_df)
-    if "query" in  gdf_iso.columns:
-        query_df =  gdf_iso["query"].apply(pd.Series)
-        gdf_iso = gdf_iso.drop(columns=["query"]).join(query_df)
-        
-    gdf_iso["carreaux"] = gdf_iso["carreaux"].apply(lambda x: eval(x) if isinstance(x, str) else x)
-    
-    #joined = gpd.sjoin(gdf, gdf_iso, predicate="intersects", how="left")
-    #print(joined.head())
-    
-    #score_counts = joined.groupby("index_right").size()
-    #gdf_iso["score"] = gdf_iso.index.map(score_counts).fillna(0).astype(int)
-    #gdf_iso = gdf_iso[gdf_iso["score"] > 0]
-    #gdf_iso = gdf_iso[~gdf_iso.geometry.is_empty & gdf_iso.geometry.notnull()]
-    
-    print(gdf_iso.head())
-
-    gdf_filtered = gdf[gdf.geometry.x.between(mart_min_lat,mart_max_lat) & gdf.geometry.y.between(mart_min_lon, mart_max_lon)]
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-    gdf_iso.plot(ax=ax, color="lightblue", alpha=0.5, edgecolor="black")  # Polygons
-    gdf_filtered.plot(ax=ax, color="red", markersize=10, alpha=0.7)  # Points
-    
-    plt.title("Check Overlap Between Points and Polygons")
-    plt.show()
-
-def map_carreaus_osrm(carr_geo, df):
-    ORS_URL = "https://api.openrouteservice.org/v2/isochrones/"    
-    transport_methods = ["driving-car", "cycling-regular", "foot-walking"]
-    headers = {
-    "Authorization": API_KEY_ORS,
-    "Content-Type": "application/json"
-    }
-    
-    query_count = 0
-    for idx, row in carr_geo.iterrows(): #vectorize to run over columns
-    
-        if query_count <= 900 and pd.isna(row["updated_at"]):
-            lat = row['latitude']
-            lon = row['longitude']
-        
-            payload = {
-            "locations": [[lon, lat]],
-            "range": [900],
-            "range_type": "time"
+def process_isochrone_file(path, gdf):
+    features = []
+    print("# Unpack nested columns - a")
+    with fiona.open(path) as src:
+        print(f"🔍 Total features in file: {len(src)}")
+        crs = src.crs
+        for feature in src:
+            properties = feature["properties"]
+            geometry = shape(feature["geometry"])
+            metadata = properties.get("metadata", {})
+            query = metadata.get("query", {})
+            flat_properties = {
+                "value": properties.get("value"),
+                "Idcar_200m": properties.get("Idcar_200m"),
+                "profile": query.get("profile"),
+                "locations": query.get("locations"),
+                "geometry": geometry
             }
-        
-            gdfs = []
-            max_queries_per_day = 2500
-            max_queries_per_minute = 40
-            
-            for mode in transport_methods:
-                if query_count >= max_queries_per_day:
-                    print("Daily API limit reached. Stopping queries.")
-                    break
-                if query_count % max_queries_per_minute == 0 and query_count > 0:
-                    print("Rate limit reached. Sleeping for 60 seconds.")
-                    time.sleep(60)  # Pause for a minute to prevent exceeding the per-minute limit
-                travel_url = f"{ORS_URL}{mode}"
-                osrm_response = requests.post(travel_url, json=payload, headers=headers)
-                query_count += 1
-                if osrm_response.status_code != 200:
-                    print(f"Error for {mode}: {osrm_response.text}")
-                    carr_geo.at[idx, f"{mode}_score"] = None
-                    continue
-                isochrone_geojson = osrm_response.json()["features"][0]["geometry"]
-                isochrone_polygon = shape(isochrone_geojson)
-                isochrone_gdf = gpd.GeoDataFrame({"transport_mode": [mode], "geometry": [isochrone_polygon]}, crs="EPSG:4326")
-                gdfs.append(isochrone_gdf)
-                
-                carr_geo.at[idx, f"{mode}_score"] = df.geometry.within(isochrone_polygon).sum()
-                carr_geo.at[idx, "updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
-            if gdfs:
-                merged_isochrones_gdf = gpd.GeoDataFrame(pd.concat(gdfs, ignore_index=True))
-            else:
-                merged_isochrones_gdf = None            
-            
-            #fig, ax = plt.subplots(figsize=(8, 8))
-            #merged_isochrones_gdf.plot(ax=ax, edgecolor="red", facecolor="none", linestyle="--", label="OSRM Polygon")
-            #ax.scatter(lon, lat, color="blue", marker="o", label="Centroid (Origin)")
-            #plt.legend()
-            #plt.show()
-            
-    
-    #carr_geo_filtered = carr_geo.dropna(subset=["updated_at"])
-    for mode in transport_methods:
-        fig, ax = plt.subplots(figsize=(15, 15))  # Adjusted figure size for better visualization
-        
-        # Plot the filled polygons with scores
-        carr_geo.plot(column=f"{mode}_score", ax=ax, cmap="OrRd", edgecolor="black", legend=True, alpha=0.7)
+            features.append(flat_properties)
+
+    gdf_iso = gpd.GeoDataFrame(features, crs=crs)
+    gdf_iso = gdf_iso[gdf_iso.is_valid & ~gdf_iso.is_empty]
+
+    if gdf_iso.empty:
+        return gpd.GeoDataFrame()
+
+    score_pivot = compute_score_columns(gdf, gdf_iso)
+    gdf_iso_unique = gdf_iso.drop_duplicates(subset="Idcar_200m").set_index("Idcar_200m")
+    return gdf_iso_unique.join(score_pivot, how="left").fillna(0)
+
+def map_carreaus_osrm_local(carr_geo, gdf):
+    results = [process_isochrone_file(path, gdf) for path in tqdm(LORRAINE_isochrones_paths, desc="Isochrones")]
+
+    partial_concats = [df for df in results if not df.empty]
+    if not partial_concats:
+        raise ValueError("All partial chunks are empty!")
+
+    df = pd.concat(partial_concats, ignore_index=True)
+
+    df[['lon', 'lat']] = pd.DataFrame(
+        df['locations'].apply(lambda x: x[0] if isinstance(x, list) and len(x) > 0 else [None, None]).tolist(),
+        index=df.index
+    )
+    df['lon'] = df['lon'].apply(lambda x: round(x, 6))
+    df['lat'] = df['lat'].apply(lambda x: round(x, 6))
+
+    carr_geo['lon'] = carr_geo['longitude'].apply(lambda x: round(x, 6))
+    carr_geo['lat'] = carr_geo['latitude'].apply(lambda x: round(x, 6))
+    carr_geo = carr_geo[['Ind', 'Men', 'Log_soc', 'lat', 'lon', 'geometry']]
+
+    carr_geo_subset = carr_geo[
+        carr_geo.set_index(['lat', 'lon']).index.isin(df.set_index(['lat', 'lon']).index)
+    ].copy()
+
+    print("Before merge:", len(df), len(carr_geo_subset))
+    merged = df.merge(
+        carr_geo_subset, on=['lat', 'lon'], how='inner', validate='one_to_one'
+    )
+    print("After merge:", len(merged))
+
+    merged = gpd.GeoDataFrame(merged, geometry="geometry_y", crs="EPSG:4326")
+    merged = merged.drop(columns="geometry_x")
+
+    example_column = next((col for col in merged.columns if col.startswith("score_")), None)
+    if example_column:
+        fig, ax = plt.subplots(figsize=(15, 15))
+        merged.plot(column=example_column, ax=ax, cmap="OrRd", edgecolor="black", legend=True, alpha=0.7)
         ax.set_xlabel("Longitude")
         ax.set_ylabel("Latitude")
-        ax.set_aspect("equal") 
-        
-        # Titles and legends
-        plt.title(f"Choropleth Map for {mode} Score", fontsize=14)
-        plt.legend()
-        
+        ax.set_aspect("equal")
+        plt.title(f"Carreaux - {example_column}")
         plt.show()
-    return carr_geo
+
+    return merged
 
 #m = folium.Map(location=[2.3522, 48.8566], zoom_start=12)
 
 #folium.GeoJson(isochrone_gdf, style_function=lambda x: {"color": "blue"}).add_to(m)
 
-df_user = accept_user_file()
+#df_user = accept_user_file()
 #def calculate_carreaus(df_user, weight_1, weight_2):
-identify_lat_long(df_user)
-df_user_geo = df_to_geo(df_user)
+#identify_lat_long(df_user)
+#df_user_geo = df_to_geo(df_user)
 df_bpe = download_bpe()
 carreaus = download_carreaus()
 carreaus_copy = carreaus.copy()
-carreaus = map_carreaus_osrm(carreaus_copy, df_bpe)
-#map_carreaus_osrm_local(carreaus_copy, df_bpe)
-carreaus.to_file(MART_file_path, driver="GeoJSON")
-gdf = gpd.GeoDataFrame(df_bpe, geometry="geometry", crs="EPSG:5794") #4326 - Europe
-pd.set_option("display.max_columns", None)
-#m.save("isochrone_map.html")
-        
-#m
+combined_carreaus = map_carreaus_osrm_local(carreaus_copy, df_bpe)
+    
+combined_carreaus.to_file("/home/onyxia/work/lorraine_car.geojson", driver="GeoJSON")
+
+
         
